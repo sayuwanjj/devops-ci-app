@@ -107,3 +107,36 @@ jobs:
         run: |
           docker push "${IMAGE_NAME}:${GITHUB_SHA}"
           docker push "${IMAGE_NAME}:latest"
+  deploy:
+    name: deploy
+    needs: image
+    if: ${{ success() && github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+    runs-on: [self-hosted, linux, x64, devops-vm]
+    permissions:
+      contents: read
+    concurrency:
+      group: deploy-devops-vm
+      cancel-in-progress: false
+    timeout-minutes: 12
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - name: Deploy with Ansible
+        working-directory: ansible
+        env:
+          ANSIBLE_HOST_KEY_CHECKING: "True"
+        run: |
+          set -euo pipefail
+          printf 'Deploying SHA: %s\n' "$GITHUB_SHA"
+          ansible-playbook -i inventory/prod.ini site.yml -e "app_tag=$GITHUB_SHA"
+          image=$(ansible vm -i inventory/prod.ini -b -m ansible.builtin.command -a 'docker ps --filter name=^/devops-ci-app$ --format json' -o)
+          printf '%s\n' "$image"
+          [[ "$image" == *"ghcr.io/sayuwanjj/devops-ci-app:$GITHUB_SHA"* ]]
+      - name: Check through Nginx
+        run: |
+          set -euo pipefail
+          curl --fail --silent --show-error --retry 3 --retry-connrefused --max-time 8 \
+            http://127.0.0.1:8011/health | python3 -c 'import json,sys; x=json.load(sys.stdin); print(x); sys.exit(x.get("status") != "ok")'
+          curl --fail --silent --show-error --max-time 8 http://127.0.0.1:8011/
